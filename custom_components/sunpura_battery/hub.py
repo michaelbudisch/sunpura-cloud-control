@@ -4,13 +4,21 @@ import logging
 from datetime import timedelta, datetime
 from typing import Any
 
-from aiohttp import ContentTypeError
+from aiohttp import ClientError, ContentTypeError
 
 from .const import DOMAIN, BASE_URL
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
 
 _LOGGER = logging.getLogger(__name__)
+IOS_APP_VERSION = "1.260204.2"
+IOS_USER_AGENT = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
+    "Html5Plus/1.0 (Immersed/20) uni-app"
+)
+SUNPURA_PROJECT_TYPE = "14"
+SUNPURA_INTERFACE_TYPE = "2"
 
 
 def md5_hash(password: str):
@@ -48,7 +56,7 @@ langs = {
     }
 
 class MyIntegrationHub:
-    def __init__(self, hass, username, password, senceId):
+    def __init__(self, hass, username, password, senceId, base_url=BASE_URL):
 
         self._entities = []
         self.senceId = senceId
@@ -64,6 +72,7 @@ class MyIntegrationHub:
         self.plants = []
         self.home_control_devices=[]
         self.cur_ctl_devices = None
+        self.base_url = (base_url or BASE_URL).strip().rstrip("/")
         try:
             language_key = hass.config.language.lower() if hasattr(hass.config, 'language') else 'en'
             self.lang = langs.get(language_key, 'en-US')
@@ -76,22 +85,70 @@ class MyIntegrationHub:
         # 重新登录 并启动轮询
         """执行登录操作"""
         _LOGGER.warning("开始登录")
-        await self._login(self._username, self._password)
+        success = await self._login(self._username, self._password)
+        if not success:
+            raise Exception("Sunpura cloud login failed")
         # 登录成功后启动轮询
         # await self.start_polling()
 
     async def _login(self, username, password):
         # 实现登录逻辑
-        url = BASE_URL + "/user/login"
+        url = self.base_url + "/user/login"
         self._session = async_get_clientsession(self.hass)
-        headers = {'Content-Type': 'application/json'}
-        hash_pwd = md5_hash(password)
-        req = {"email": username, "password": hash_pwd, "phoneOs": 1, "phoneModel": "1.1", "appVersion": "V1.1"}
-        json_data = json.dumps(req)
-        resp = await self.post(headers, url, json_data)
-        _LOGGER.info(f"登录响应：{resp}")
-        if resp['result'] == 1:
-            return True
+        username = username.strip()
+        headers = {
+            **self._build_common_headers(),
+            "Content-Type": "application/json;charset=UTF-8",
+        }
+        last_message = "Login failed"
+
+        # Prime session cookie (JSESSIONID) before POST /user/login.
+        try:
+            async with self._session.get(url, headers=self._build_common_headers()) as resp:
+                self._session.cookie_jar.update_cookies(resp.cookies)
+        except ClientError:
+            pass
+
+        for variant_name, req in self._build_login_payloads(username, password):
+            try:
+                async with self._session.post(url, headers=headers, data=json.dumps(req)) as resp:
+                    if resp.status != 200:
+                        response_text = await resp.text()
+                        raise Exception(
+                            f"Login failed (HTTP {resp.status}): {response_text[:200]}"
+                        )
+                    self._session.cookie_jar.update_cookies(resp.cookies)
+                    try:
+                        resp_data = await resp.json()
+                    except (json.JSONDecodeError, ContentTypeError) as err:
+                        response_text = await resp.text()
+                        raise Exception(
+                            f"Unexpected login response: {response_text[:200]}"
+                        ) from err
+            except ClientError as err:
+                raise Exception(f"HTTP error during login: {err}") from err
+
+            _LOGGER.debug("登录响应（%s）：%s", variant_name, resp_data)
+            if isinstance(resp_data, dict) and resp_data.get("result") == 1:
+                _LOGGER.info("登录成功，使用变体：%s", variant_name)
+                return True
+
+            if isinstance(resp_data, dict):
+                message = str(resp_data.get("msg", "Login failed"))
+                result = resp_data.get("result")
+                _LOGGER.debug(
+                    "登录失败（%s）：result=%s msg=%s",
+                    variant_name,
+                    result,
+                    message,
+                )
+                last_message = message
+                if self._looks_like_connectivity_error(message):
+                    raise Exception(message)
+            else:
+                raise Exception(f"Invalid login response format: {resp_data}")
+
+        _LOGGER.error(f"登录失败，最后错误：{last_message}")
         return False
 
     async def start_polling(self):
@@ -182,7 +239,7 @@ class MyIntegrationHub:
         _LOGGER.info(f"更新数据getHomeCountData完成，耗时：{end_time - start_time}")
 
     async def getHomeCountData(self, sn=""):
-        url = BASE_URL + "/energy/getHomeCountData"
+        url = self.base_url + "/energy/getHomeCountData"
         try:
             resp = await self.post({}, url, params={
                 "plantId": self.senceId,
@@ -203,10 +260,12 @@ class MyIntegrationHub:
 
     # 获取用户下所有电站
     async def getPlantVos(self):
-        url = BASE_URL + "/plant/getPlantVos"
+        url = self.base_url + "/plant/getPlantVos"
         resp = await self.get({}, url, {})
+        if not isinstance(resp, dict):
+            raise Exception(f"Invalid getPlantVos response: {resp}")
         _LOGGER.debug(f"<UNK>{resp}")
-        res = resp['obj']
+        res = resp.get('obj', [])
         # _LOGGER.info(res)
         self.plants = res
         return res
@@ -214,19 +273,21 @@ class MyIntegrationHub:
     # AI能流详情
     async def getAiSystemByPlantId(self):
         # _LOGGER.info(self._session)
-        url = BASE_URL + "/aiSystem/getAiSystemByPlantId"
+        url = self.base_url + "/aiSystem/getAiSystemByPlantId"
         resp = await self.get({}, url, params={
             "plantId": self.senceId
         })
+        if not isinstance(resp, dict):
+            raise Exception(f"Invalid getAiSystemByPlantId response: {resp}")
         _LOGGER.debug(f"ai模式响应：{resp}")
-        res = resp['obj']
+        res = resp.get('obj')
         _LOGGER.debug(f"res:{res}")
         return res
 
     # 获取设备数据详情
     async def fetch_device_info(self, device_type, device_sn):
         # _LOGGER.info(self._session)
-        url = BASE_URL + "/device/getDeviceBySn"
+        url = self.base_url + "/device/getDeviceBySn"
         # 获取当前日期的yyyy-MM-dd格式字符串
         a = datetime.now().strftime("%Y-%m-%d")
         resp = await self.post({}, url, params={
@@ -234,12 +295,16 @@ class MyIntegrationHub:
             'time': a,
             'sn': device_sn,
         })
+        if not isinstance(resp, dict):
+            raise Exception(f"Invalid fetch_device_info response: {resp}")
         _LOGGER.debug(f"设备数据详情响应：{resp}")
-        res = resp['obj']
-        _LOGGER.debug(res['chartMap'])
-        if res is not None:
+        res = resp.get('obj')
+        if isinstance(res, dict):
+            _LOGGER.debug(res.get('chartMap'))
             # 置空
             res['chartMap'] = None
+        else:
+            raise Exception(f"Invalid device detail payload: {resp}")
         # _LOGGER.debug(res)
         self.device_data[device_sn] = res
         return res
@@ -247,7 +312,7 @@ class MyIntegrationHub:
     # 开关
     async def switch_socket(self, sn, v):
         # _LOGGER.info(self._session)
-        url = BASE_URL + "/device/setDeviceParam"
+        url = self.base_url + "/device/setDeviceParam"
         resp = await self.post({'Content-Type': 'application/x-www-form-urlencoded'}, url, {
             'deviceSn': sn,
             'startAddr': 0x0000,
@@ -260,7 +325,7 @@ class MyIntegrationHub:
 
     # 开关
     async def switch_charger(self, sn, v):
-        url = BASE_URL + "/device/setDeviceParam"
+        url = self.base_url + "/device/setDeviceParam"
         resp = await self.post({'Content-Type': 'application/x-www-form-urlencoded'}, url, {
             'deviceSn': sn,
             'startAddr': 0x00AF,
@@ -273,7 +338,7 @@ class MyIntegrationHub:
 
     # 开关
     async def switch_product(self, sn, v):
-        url = BASE_URL + "/energyProduct/setEnergyProductSwitch"
+        url = self.base_url + "/energyProduct/setEnergyProductSwitch"
         resp = await self.post({}, url, params={
             "deviceSn": sn,
             "switchStatus": v
@@ -285,7 +350,7 @@ class MyIntegrationHub:
 
     # 电站日统计数据
     async def get_energy_data_day(self, plant_id, sn=""):
-        url = BASE_URL + "/energy/getEnergyDataDay"
+        url = self.base_url + "/energy/getEnergyDataDay"
         a = datetime.now().strftime("%Y-%m-%d")
         resp = await self.post({}, url, params={
             'plantId':plant_id,
@@ -298,7 +363,7 @@ class MyIntegrationHub:
 
     # 电站月统计数据
     async def get_energy_data_month(self, plant_id, sn=""):
-        url = BASE_URL + "/energy/getEnergyDataMonth"
+        url = self.base_url + "/energy/getEnergyDataMonth"
         a = datetime.now().strftime("%Y-%m")
         resp = await self.post({}, url, params={
             'plantId':plant_id,
@@ -310,7 +375,7 @@ class MyIntegrationHub:
         return res
     # 电站年统计数据
     async def get_energy_data_year(self, plant_id, sn=""):
-        url = BASE_URL + "/energy/getEnergyDataYear"
+        url = self.base_url + "/energy/getEnergyDataYear"
         a = datetime.now().strftime("%Y")
         resp = await self.post({}, url, params={
             'plantId':plant_id,
@@ -322,7 +387,7 @@ class MyIntegrationHub:
         return res
     # 电站总计数据
     async def get_energy_data_total(self, plant_id, sn=""):
-        url = BASE_URL + "/energy/getEnergyDataTotal"
+        url = self.base_url + "/energy/getEnergyDataTotal"
         a = datetime.now().strftime("%Y")
         resp = await self.post({}, url, params={
             'plantId':plant_id,
@@ -333,7 +398,7 @@ class MyIntegrationHub:
         # _LOGGER.info(res)
         return res
     async def get_home_control_devices(self):
-        url = BASE_URL + "/energy/getHomeControlSn/"+self.senceId
+        url = self.base_url + "/energy/getHomeControlSn/"+self.senceId
         resp = await self.get({}, url)
         if resp and resp.get('obj'):
             res = resp['obj']
@@ -352,56 +417,149 @@ class MyIntegrationHub:
             return []
 
     # 通用POST请求
-    async def post(self, headers, url, data=None, params=None):
-        # headers['Accept-Language'] =self.
-        headers["Accept-Language"] = "en-US"
-        async with self._session.post(url, headers=headers, params=params, data=data) as resp:
-            if resp.status == 200:
+    @staticmethod
+    def _login_field_variants() -> tuple[str, ...]:
+        return ("email", "username", "userName", "account", "phone")
+
+    def _build_login_payloads(self, username: str, password: str) -> list[tuple[str, dict]]:
+        hashed_password = md5_hash(password)
+        client_variants = (
+            {"phoneOs": "2", "phoneModel": "apple", "appVersion": IOS_APP_VERSION},
+            {"phoneOs": 2, "phoneModel": "iPhone", "appVersion": "V1.1"},
+            {"phoneOs": 1, "phoneModel": "1.1", "appVersion": "V1.1"},
+        )
+        payloads: list[tuple[str, dict]] = []
+        seen_payloads: set[str] = set()
+        for client in client_variants:
+            phone_os = client["phoneOs"]
+            for field_name in self._login_field_variants():
+                for password_mode, password_value in (("md5", hashed_password), ("plain", password)):
+                    payload = {field_name: username, "password": password_value, **client}
+                    payload_key = json.dumps(payload, sort_keys=True)
+                    if payload_key in seen_payloads:
+                        continue
+                    seen_payloads.add(payload_key)
+                    payloads.append((f"os{phone_os}/{field_name}/{password_mode}", payload))
+        return payloads
+
+    def _build_common_headers(self) -> dict:
+        return {
+            "Accept": "*/*",
+            "Accept-Language": self.lang,
+            "User-Agent": IOS_USER_AGENT,
+            "interfacetype": SUNPURA_INTERFACE_TYPE,
+            "appversion": IOS_APP_VERSION,
+            "projecttype": SUNPURA_PROJECT_TYPE,
+            "token": "<null>",
+        }
+
+    @staticmethod
+    def _looks_like_connectivity_error(message: str) -> bool:
+        if not message:
+            return False
+        lowered = message.lower()
+        markers = (
+            "timeout",
+            "timed out",
+            "network",
+            "server",
+            "gateway",
+            "service",
+            "connection",
+            "connect",
+            "系统",
+            "服务",
+            "连接",
+        )
+        return any(marker in lowered for marker in markers)
+
+    # 通用POST请求
+    @staticmethod
+    def _is_login_required_response(resp_data: Any) -> bool:
+        if not isinstance(resp_data, dict):
+            return False
+        if str(resp_data.get("result")) == "10000":
+            return True
+        for value in resp_data.values():
+            value_text = str(value)
+            if "请登录" in value_text or "Please login" in value_text:
+                return True
+        return False
+
+    async def post(self, headers, url, data=None, params=None, retry_on_login=True):
+        req_headers = {**self._build_common_headers(), **(headers or {})}
+        try:
+            async with self._session.post(url, headers=req_headers, params=params, data=data) as resp:
+                if resp.status != 200:
+                    response_text = await resp.text()
+                    raise Exception(
+                        f"Failed to fetch data from {url} (HTTP {resp.status}): {response_text[:200]}"
+                    )
                 self._session.cookie_jar.update_cookies(resp.cookies)
                 try:
                     resp_data = await resp.json()
-                except json.JSONDecodeError:
-                    resp_data = await resp.text()
-                    _LOGGER.warning(resp_data)
-                except ContentTypeError:
-                    resp_data = await resp.text()
-                    _LOGGER.warning(resp_data)
-                if "请登录" in resp_data.values() or "Please login" in resp_data.values() or resp_data.get(
-                        "result") == "10000":
-                    _LOGGER.warning("需要登录")
-                    await self.login()
-                    return None
-                return resp_data
-            else:
-                raise Exception(f"Failed to fetch data from {url}")
+                except (json.JSONDecodeError, ContentTypeError) as err:
+                    resp_text = await resp.text()
+                    _LOGGER.warning(f"Unexpected non-JSON POST response from {url}: {resp_text}")
+                    raise Exception(f"Unexpected non-JSON response from {url}") from err
+        except ClientError as err:
+            raise Exception(f"HTTP error while requesting {url}: {err}") from err
+
+        if self._is_login_required_response(resp_data):
+            _LOGGER.warning("需要登录")
+            if retry_on_login:
+                await self.login()
+                return await self.post(
+                    headers,
+                    url,
+                    data=data,
+                    params=params,
+                    retry_on_login=False
+                )
+            return None
+        return resp_data
 
         # 通用Get请求
 
     # 通用GET请求
-    async def get(self, headers, url, data=None, params=None):
-        # headers['Accept-Language'] =self.lang
-        headers['Accept-Language'] ='en-US'
-        async with self._session.get(url, headers=headers, params=params, data=data) as resp:
-            if resp.status == 200:
+    async def get(self, headers, url, data=None, params=None, retry_on_login=True):
+        req_headers = {**self._build_common_headers(), **(headers or {})}
+        try:
+            async with self._session.get(url, headers=req_headers, params=params, data=data) as resp:
+                if resp.status != 200:
+                    response_text = await resp.text()
+                    raise Exception(
+                        f"Failed to fetch data from {url} (HTTP {resp.status}): {response_text[:200]}"
+                    )
                 self._session.cookie_jar.update_cookies(resp.cookies)
                 try:
                     resp_data = await resp.json()
-                except json.JSONDecodeError:
-                    resp_data = await resp.text()
-                if "请登录" in resp_data.values() or "Please login" in resp_data.values() or resp_data.get(
-                        "result") == "10000":
-                    _LOGGER.warning("需要登录")
-                    _LOGGER.warning(resp_data)
-                    await self.login()
-                    return None
-                return resp_data
-            else:
-                raise Exception(f"Failed to fetch data from {url}")
+                except (json.JSONDecodeError, ContentTypeError) as err:
+                    resp_text = await resp.text()
+                    _LOGGER.warning(f"Unexpected non-JSON GET response from {url}: {resp_text}")
+                    raise Exception(f"Unexpected non-JSON response from {url}") from err
+        except ClientError as err:
+            raise Exception(f"HTTP error while requesting {url}: {err}") from err
+
+        if self._is_login_required_response(resp_data):
+            _LOGGER.warning("需要登录")
+            _LOGGER.warning(resp_data)
+            if retry_on_login:
+                await self.login()
+                return await self.get(
+                    headers,
+                    url,
+                    data=data,
+                    params=params,
+                    retry_on_login=False
+                )
+            return None
+        return resp_data
 
     # Battery Control API Methods
     async def set_ai_system_energy_mode(self, payload: dict):
         """Set AI system energy mode for battery control."""
-        url = BASE_URL + "/aiSystem/setAiSystemTimesWithEnergyMode"
+        url = self.base_url + "/aiSystem/setAiSystemTimesWithEnergyMode"
         
         # Use the existing authenticated session via post() method
         headers = {

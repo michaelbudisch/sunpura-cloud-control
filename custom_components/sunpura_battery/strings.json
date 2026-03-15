@@ -7,7 +7,8 @@
         "description": "Configure your Sunpura S2400 battery system",
         "data": {
           "username": "Username",
-          "password": "Password"
+          "password": "Password",
+          "base_url": "API Base URL (optional)"
         }
       },
       "confirm_discovery": {

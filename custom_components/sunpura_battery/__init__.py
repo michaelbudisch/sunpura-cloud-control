@@ -32,6 +32,7 @@ async def async_setup_entry(hass, entry):
                 entry.data["username"],
                 entry.data["password"],
                 entry.data["selected_device_id"],
+                entry.data.get("base_url", BASE_URL),
             )
             hass.data[DOMAIN]['hub'] = hub
             hass.data[DOMAIN]['cur_plant_name']= entry.data["selected_device_name"]
