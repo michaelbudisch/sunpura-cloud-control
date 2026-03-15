@@ -6,7 +6,13 @@ from typing import Any
 
 from aiohttp import ClientError, ContentTypeError
 
-from .const import DOMAIN, BASE_URL
+from .const import (
+    BASE_URL,
+    DEFAULT_POLL_INTERVAL_SECONDS,
+    DOMAIN,
+    MAX_POLL_INTERVAL_SECONDS,
+    MIN_POLL_INTERVAL_SECONDS,
+)
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
 
@@ -56,7 +62,15 @@ langs = {
     }
 
 class MyIntegrationHub:
-    def __init__(self, hass, username, password, senceId, base_url=BASE_URL):
+    def __init__(
+        self,
+        hass,
+        username,
+        password,
+        senceId,
+        base_url=BASE_URL,
+        poll_interval_seconds=DEFAULT_POLL_INTERVAL_SECONDS,
+    ):
 
         self._entities = []
         self.senceId = senceId
@@ -65,7 +79,7 @@ class MyIntegrationHub:
         self._username = username
         self._password = password
         self._session = async_get_clientsession(self.hass)  # 存储登录后的会话
-        self._unsub_polling = None  # 存储定时器取消函数
+        self._unsub_polling = None  #存储定时器取消函数 
         self._unsub_login = None
         self.total_data = {}
         self.device_data: dict[str, Any] = {}
@@ -73,6 +87,10 @@ class MyIntegrationHub:
         self.home_control_devices=[]
         self.cur_ctl_devices = None
         self.base_url = (base_url or BASE_URL).strip().rstrip("/")
+        self.poll_interval_seconds = max(
+            MIN_POLL_INTERVAL_SECONDS,
+            min(MAX_POLL_INTERVAL_SECONDS, int(poll_interval_seconds)),
+        )
         try:
             language_key = hass.config.language.lower() if hasattr(hass.config, 'language') else 'en'
             self.lang = langs.get(language_key, 'en-US')
@@ -156,8 +174,12 @@ class MyIntegrationHub:
         # 先取消已有轮询（如果存在）
         await self.stop_polling()
 
-        # 设置轮询间隔（示例：每15秒）
-        update_interval = timedelta(seconds      =10)
+        # 设置轮询间隔
+        update_interval = timedelta(seconds=self.poll_interval_seconds)
+        _LOGGER.info(
+            "Starting Sunpura polling every %s seconds",
+            self.poll_interval_seconds,
+        )
 
         # 注册定时任务
         self._unsub_polling = async_track_time_interval(

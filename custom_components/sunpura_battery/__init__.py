@@ -11,7 +11,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.const import Platform
 from .hub import MyIntegrationHub
-from .const import DOMAIN, BASE_URL  # pylint:disable=unused-import
+from .const import (
+    BASE_URL,
+    CONF_POLL_INTERVAL_SECONDS,
+    DEFAULT_POLL_INTERVAL_SECONDS,
+    DOMAIN,
+)  # pylint:disable=unused-import
 
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.NUMBER, Platform.SELECT]
 
@@ -27,12 +32,22 @@ async def async_setup_entry(hass, entry):
             hass.data.setdefault(DOMAIN, {})
             
             _LOGGER.debug("Creating hub instance")
+            poll_interval_seconds = int(
+                entry.options.get(
+                    CONF_POLL_INTERVAL_SECONDS,
+                    entry.data.get(
+                        CONF_POLL_INTERVAL_SECONDS,
+                        DEFAULT_POLL_INTERVAL_SECONDS,
+                    ),
+                )
+            )
             hub = MyIntegrationHub(
                 hass,
                 entry.data["username"],
                 entry.data["password"],
                 entry.data["selected_device_id"],
                 entry.data.get("base_url", BASE_URL),
+                poll_interval_seconds=poll_interval_seconds,
             )
             hass.data[DOMAIN]['hub'] = hub
             hass.data[DOMAIN]['cur_plant_name']= entry.data["selected_device_name"]

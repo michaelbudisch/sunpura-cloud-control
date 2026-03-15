@@ -11,7 +11,14 @@ from homeassistant import config_entries, exceptions
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import voluptuous as vol
 
-from .const import BASE_URL, DOMAIN
+from .const import (
+    BASE_URL,
+    CONF_POLL_INTERVAL_SECONDS,
+    DEFAULT_POLL_INTERVAL_SECONDS,
+    DOMAIN,
+    MAX_POLL_INTERVAL_SECONDS,
+    MIN_POLL_INTERVAL_SECONDS,
+)
 
 _LOGGER = logging.getLogger(__name__)
 IOS_APP_VERSION = "1.260204.2"
@@ -34,6 +41,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.data = {}
         self.family = {}
 
+    @staticmethod
+    def async_get_options_flow(config_entry):
+        return SunpuraOptionsFlow(config_entry)
+
     async def async_step_user(self, user_input=None):
         errors = {}
 
@@ -42,12 +53,19 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 username = user_input["username"].strip()
                 password = user_input["password"]
                 base_url = self._normalize_base_url(user_input.get("base_url", BASE_URL))
+                poll_interval_seconds = int(
+                    user_input.get(
+                        CONF_POLL_INTERVAL_SECONDS,
+                        DEFAULT_POLL_INTERVAL_SECONDS,
+                    )
+                )
                 await self._login(username, password, base_url)
                 self.data.update(
                     {
                         "username": username,
                         "password": password,
                         "base_url": base_url,
+                        CONF_POLL_INTERVAL_SECONDS: poll_interval_seconds,
                     }
                 )
                 return await self.async_step_select_device()
@@ -71,6 +89,16 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("username"): str,
                     vol.Required("password"): str,
                     vol.Optional("base_url", default=BASE_URL): str,
+                    vol.Optional(
+                        CONF_POLL_INTERVAL_SECONDS,
+                        default=DEFAULT_POLL_INTERVAL_SECONDS,
+                    ): vol.All(
+                        vol.Coerce(int),
+                        vol.Range(
+                            min=MIN_POLL_INTERVAL_SECONDS,
+                            max=MAX_POLL_INTERVAL_SECONDS,
+                        ),
+                    ),
                 }
             ),
             errors=errors,
@@ -293,3 +321,51 @@ class InvalidAuth(exceptions.HomeAssistantError):
 
 class InvalidHost(exceptions.HomeAssistantError):
     """Error to indicate there is an invalid hostname."""
+
+
+class SunpuraOptionsFlow(config_entries.OptionsFlow):
+    """Handle options for Sunpura Battery Control."""
+
+    def __init__(self, config_entry):
+        self.config_entry = config_entry
+
+    async def async_step_init(self, user_input=None):
+        if user_input is not None:
+            poll_interval_seconds = int(
+                user_input.get(
+                    CONF_POLL_INTERVAL_SECONDS,
+                    DEFAULT_POLL_INTERVAL_SECONDS,
+                )
+            )
+            return self.async_create_entry(
+                title="",
+                data={CONF_POLL_INTERVAL_SECONDS: poll_interval_seconds},
+            )
+
+        current_poll_interval = int(
+            self.config_entry.options.get(
+                CONF_POLL_INTERVAL_SECONDS,
+                self.config_entry.data.get(
+                    CONF_POLL_INTERVAL_SECONDS,
+                    DEFAULT_POLL_INTERVAL_SECONDS,
+                ),
+            )
+        )
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_POLL_INTERVAL_SECONDS,
+                        default=current_poll_interval,
+                    ): vol.All(
+                        vol.Coerce(int),
+                        vol.Range(
+                            min=MIN_POLL_INTERVAL_SECONDS,
+                            max=MAX_POLL_INTERVAL_SECONDS,
+                        ),
+                    ),
+                }
+            ),
+        )

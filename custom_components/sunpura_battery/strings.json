@@ -4,11 +4,12 @@
     "step": {
       "user": {
         "title": "Sunpura Battery Control Setup",
-        "description": "Configure your Sunpura S2400 battery system",
+        "description": "Configure your Sunpura S2400 battery system.\n\nWarning: Very low polling intervals can overload the cloud API and may cause temporary blocks. Recommended: 5-10 seconds.",
         "data": {
           "username": "Username",
           "password": "Password",
-          "base_url": "API Base URL (optional)"
+          "base_url": "API Base URL (optional)",
+          "poll_interval_seconds": "Polling interval in seconds (1-60)"
         }
       },
       "confirm_discovery": {
@@ -22,6 +23,17 @@
     },
     "abort": {
       "already_configured": "Device is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Sunpura Battery Control Options",
+        "description": "Adjust polling settings.\n\nWarning: Very low polling intervals can overload the cloud API and may cause temporary blocks. Recommended: 5-10 seconds.",
+        "data": {
+          "poll_interval_seconds": "Polling interval in seconds (1-60)"
+        }
+      }
     }
   }
 }
