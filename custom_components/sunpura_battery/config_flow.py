@@ -29,6 +29,7 @@ IOS_USER_AGENT = (
 )
 SUNPURA_PROJECT_TYPE = "14"
 SUNPURA_INTERFACE_TYPE = "2"
+LEGACY_BASE_URL = "https://monitor.ai-ec.cloud:8443"
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -59,12 +60,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         DEFAULT_POLL_INTERVAL_SECONDS,
                     )
                 )
-                await self._login(username, password, base_url)
+                resolved_base_url = await self._login(username, password, base_url)
                 self.data.update(
                     {
                         "username": username,
                         "password": password,
-                        "base_url": base_url,
+                        "base_url": resolved_base_url,
                         CONF_POLL_INTERVAL_SECONDS: poll_interval_seconds,
                     }
                 )
@@ -208,6 +209,16 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
 
     @staticmethod
+    def _candidate_base_urls(base_url: str) -> list[str]:
+        primary = (base_url or BASE_URL).strip().rstrip("/")
+        candidates = [primary]
+        if primary == LEGACY_BASE_URL:
+            candidates.append(BASE_URL)
+        elif primary == BASE_URL:
+            candidates.append(LEGACY_BASE_URL)
+        return candidates
+
+    @staticmethod
     def _looks_like_connectivity_error(message: str) -> bool:
         if not message:
             return False
@@ -227,59 +238,76 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
         return any(marker in lowered for marker in markers)
 
-    async def _login(self, username: str, password: str, base_url: str) -> bool:
-        url = f"{base_url}/user/login"
+    async def _login(self, username: str, password: str, base_url: str) -> str:
         session = async_get_clientsession(self.hass)
         headers = {
             **self._build_common_headers(),
             "Content-Type": "application/json;charset=UTF-8",
         }
-        last_message = "Login failed"
+        last_auth_message = "Login failed"
+        last_connect_message = ""
 
-        # Prime a session cookie (JSESSIONID) like the app does before POST login.
-        try:
-            async with session.get(url, headers=self._build_common_headers()) as resp:
-                session.cookie_jar.update_cookies(resp.cookies)
-        except ClientError:
-            pass
+        for candidate_base_url in self._candidate_base_urls(base_url):
+            url = f"{candidate_base_url}/user/login"
 
-        for variant_name, login_payload in self._build_login_payloads(username, password):
-            payload = {}
+            # Prime a session cookie (JSESSIONID) like the app does before POST login.
             try:
-                async with session.post(url, headers=headers, data=json.dumps(login_payload)) as resp:
-                    if resp.status != 200:
-                        raise CannotConnect(f"Login failed (HTTP {resp.status})")
+                async with session.get(url, headers=self._build_common_headers()) as resp:
                     session.cookie_jar.update_cookies(resp.cookies)
-                    try:
-                        payload = await resp.json()
-                    except (json.JSONDecodeError, ContentTypeError) as err:
-                        response_text = await resp.text()
-                        raise CannotConnect(
-                            f"Unexpected login response: {response_text[:120]}"
-                        ) from err
-            except ClientError as err:
-                raise CannotConnect(f"HTTP error during login: {err}") from err
+            except ClientError:
+                pass
 
-            if not isinstance(payload, dict):
-                raise CannotConnect(f"Invalid login response format: {payload}")
+            for variant_name, login_payload in self._build_login_payloads(username, password):
+                payload = {}
+                try:
+                    async with session.post(url, headers=headers, data=json.dumps(login_payload)) as resp:
+                        if resp.status != 200:
+                            raise CannotConnect(f"Login failed (HTTP {resp.status})")
+                        session.cookie_jar.update_cookies(resp.cookies)
+                        try:
+                            payload = await resp.json()
+                        except (json.JSONDecodeError, ContentTypeError) as err:
+                            response_text = await resp.text()
+                            raise CannotConnect(
+                                f"Unexpected login response: {response_text[:120]}"
+                            ) from err
+                except ClientError as err:
+                    last_connect_message = f"HTTP error during login: {err}"
+                    continue
+                except CannotConnect as err:
+                    last_connect_message = str(err)
+                    continue
 
-            if payload.get("result") == 1:
-                _LOGGER.info(f"Login succeeded with variant: {variant_name}")
-                return True
+                if not isinstance(payload, dict):
+                    last_connect_message = f"Invalid login response format: {payload}"
+                    continue
 
-            message = str(payload.get("msg", "Login failed"))
-            result = payload.get("result")
-            _LOGGER.debug(
-                "Login attempt failed for variant %s (result=%s, msg=%s)",
-                variant_name,
-                result,
-                message,
-            )
-            last_message = message
-            if self._looks_like_connectivity_error(message):
-                raise CannotConnect(message)
+                if payload.get("result") == 1:
+                    _LOGGER.info(
+                        "Login succeeded with variant %s on %s",
+                        variant_name,
+                        candidate_base_url,
+                    )
+                    return candidate_base_url
 
-        raise InvalidAuth(last_message)
+                message = str(payload.get("msg", "Login failed"))
+                result = payload.get("result")
+                _LOGGER.debug(
+                    "Login attempt failed for variant %s on %s (result=%s, msg=%s)",
+                    variant_name,
+                    candidate_base_url,
+                    result,
+                    message,
+                )
+                last_auth_message = message
+                if self._looks_like_connectivity_error(message):
+                    last_connect_message = message
+
+        if last_auth_message and last_auth_message != "Login failed":
+            raise InvalidAuth(last_auth_message)
+        if last_connect_message:
+            raise CannotConnect(last_connect_message)
+        raise InvalidAuth("Login failed")
 
     async def _fetch_devices(self, base_url: str) -> dict:
         url = f"{base_url}/plant/getPlantVos"

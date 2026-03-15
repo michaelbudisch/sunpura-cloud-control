@@ -25,6 +25,7 @@ IOS_USER_AGENT = (
 )
 SUNPURA_PROJECT_TYPE = "14"
 SUNPURA_INTERFACE_TYPE = "2"
+LEGACY_BASE_URL = "https://monitor.ai-ec.cloud:8443"
 
 
 def md5_hash(password: str):
@@ -110,8 +111,6 @@ class MyIntegrationHub:
         # await self.start_polling()
 
     async def _login(self, username, password):
-        # 实现登录逻辑
-        url = self.base_url + "/user/login"
         self._session = async_get_clientsession(self.hass)
         username = username.strip()
         headers = {
@@ -119,54 +118,69 @@ class MyIntegrationHub:
             "Content-Type": "application/json;charset=UTF-8",
         }
         last_message = "Login failed"
+        last_connect_message = ""
 
-        # Prime session cookie (JSESSIONID) before POST /user/login.
-        try:
-            async with self._session.get(url, headers=self._build_common_headers()) as resp:
-                self._session.cookie_jar.update_cookies(resp.cookies)
-        except ClientError:
-            pass
+        for candidate_base_url in self._candidate_base_urls(self.base_url):
+            url = candidate_base_url + "/user/login"
 
-        for variant_name, req in self._build_login_payloads(username, password):
+            # Prime session cookie (JSESSIONID) before POST /user/login.
             try:
-                async with self._session.post(url, headers=headers, data=json.dumps(req)) as resp:
-                    if resp.status != 200:
-                        response_text = await resp.text()
-                        raise Exception(
-                            f"Login failed (HTTP {resp.status}): {response_text[:200]}"
-                        )
+                async with self._session.get(url, headers=self._build_common_headers()) as resp:
                     self._session.cookie_jar.update_cookies(resp.cookies)
-                    try:
-                        resp_data = await resp.json()
-                    except (json.JSONDecodeError, ContentTypeError) as err:
-                        response_text = await resp.text()
-                        raise Exception(
-                            f"Unexpected login response: {response_text[:200]}"
-                        ) from err
-            except ClientError as err:
-                raise Exception(f"HTTP error during login: {err}") from err
+            except ClientError:
+                pass
 
-            _LOGGER.debug("登录响应（%s）：%s", variant_name, resp_data)
-            if isinstance(resp_data, dict) and resp_data.get("result") == 1:
-                _LOGGER.info("登录成功，使用变体：%s", variant_name)
-                return True
+            for variant_name, req in self._build_login_payloads(username, password):
+                try:
+                    async with self._session.post(url, headers=headers, data=json.dumps(req)) as resp:
+                        if resp.status != 200:
+                            response_text = await resp.text()
+                            raise Exception(
+                                f"Login failed (HTTP {resp.status}): {response_text[:200]}"
+                            )
+                        self._session.cookie_jar.update_cookies(resp.cookies)
+                        try:
+                            resp_data = await resp.json()
+                        except (json.JSONDecodeError, ContentTypeError) as err:
+                            response_text = await resp.text()
+                            raise Exception(
+                                f"Unexpected login response: {response_text[:200]}"
+                            ) from err
+                except ClientError as err:
+                    last_connect_message = f"HTTP error during login: {err}"
+                    continue
+                except Exception as err:
+                    message = str(err)
+                    if self._looks_like_connectivity_error(message):
+                        last_connect_message = message
+                    continue
 
-            if isinstance(resp_data, dict):
-                message = str(resp_data.get("msg", "Login failed"))
-                result = resp_data.get("result")
-                _LOGGER.debug(
-                    "登录失败（%s）：result=%s msg=%s",
-                    variant_name,
-                    result,
-                    message,
-                )
-                last_message = message
-                if self._looks_like_connectivity_error(message):
-                    raise Exception(message)
-            else:
-                raise Exception(f"Invalid login response format: {resp_data}")
+                _LOGGER.debug("登录响应（%s/%s）：%s", candidate_base_url, variant_name, resp_data)
+                if isinstance(resp_data, dict) and resp_data.get("result") == 1:
+                    self.base_url = candidate_base_url
+                    _LOGGER.info("登录成功，使用 %s（变体：%s）", candidate_base_url, variant_name)
+                    return True
 
-        _LOGGER.error(f"登录失败，最后错误：{last_message}")
+                if isinstance(resp_data, dict):
+                    message = str(resp_data.get("msg", "Login failed"))
+                    result = resp_data.get("result")
+                    _LOGGER.debug(
+                        "登录失败（%s/%s）：result=%s msg=%s",
+                        candidate_base_url,
+                        variant_name,
+                        result,
+                        message,
+                    )
+                    last_message = message
+                    if self._looks_like_connectivity_error(message):
+                        last_connect_message = message
+                else:
+                    last_connect_message = f"Invalid login response format: {resp_data}"
+
+        if last_connect_message and last_message == "Login failed":
+            _LOGGER.error(f"登录失败（连接问题）：{last_connect_message}")
+        else:
+            _LOGGER.error(f"登录失败，最后错误：{last_message}")
         return False
 
     async def start_polling(self):
@@ -494,6 +508,16 @@ class MyIntegrationHub:
             "连接",
         )
         return any(marker in lowered for marker in markers)
+
+    @staticmethod
+    def _candidate_base_urls(base_url: str) -> list[str]:
+        primary = (base_url or BASE_URL).strip().rstrip("/")
+        candidates = [primary]
+        if primary == LEGACY_BASE_URL:
+            candidates.append(BASE_URL)
+        elif primary == BASE_URL:
+            candidates.append(LEGACY_BASE_URL)
+        return candidates
 
     # 通用POST请求
     @staticmethod
