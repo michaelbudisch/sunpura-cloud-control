@@ -11,9 +11,38 @@ This fork focuses on API reliability, especially around current Sunpura cloud lo
 ## Quick Links
 
 - Fork repo (recommended for HACS): `https://github.com/michaelbudisch/sunpura-cloud-control`
-- Mirror repo: `https://github.com/michaelbudisch/sunpura-cloud-control-main`
 - Upstream project: `https://github.com/smartenergycontrol-be/sunpura-cloud-control`
 - Issues for this fork: `https://github.com/michaelbudisch/sunpura-cloud-control/issues`
+
+## Deutsche Anleitung (Schnellstart)
+
+### Installation ueber HACS
+
+1. In Home Assistant `HACS -> Integrationen` oeffnen.
+2. Oben rechts auf das Menue (`...`) klicken und `Custom repositories` waehlen.
+3. Diese URL eintragen: `https://github.com/michaelbudisch/sunpura-cloud-control`
+4. Kategorie `Integration` waehlen und speichern.
+5. `Sunpura Battery Control` installieren.
+6. Home Assistant neu starten.
+
+### Einrichtung in Home Assistant
+
+1. Gehe zu `Einstellungen -> Geraete und Dienste -> Integration hinzufuegen`.
+2. Waehle `Sunpura Battery Control`.
+3. Trage deine Sunpura App-Daten ein:
+   - `username` (meist E-Mail aus der App)
+   - `password` (gleiches Passwort wie in der App)
+   - `base_url` optional
+
+Falls Login-Fehler auftreten (`invalid_auth`), setze:
+
+`base_url = https://server-nj.ai-ec.cloud:8443`
+
+### Haeufige Probleme
+
+- `invalid_auth`: Zugangsdaten in der Sunpura App testen und Integration danach neu konfigurieren.
+- Keine Geraete gefunden: In der App pruefen, ob die Anlage online ist, dann Integration neu laden.
+- Keine Datenupdates: Integration neu laden, Home Assistant neu starten, Debug-Logs aktivieren.
 
 ## What Is Different In This Fork
 
